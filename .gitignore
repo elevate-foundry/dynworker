@@ -1,0 +1,13 @@
+# Rust
+engine/target/
+
+# Node
+node_modules/
+api/node_modules/
+sdk/node_modules/
+
+# Runtime data
+.dynworker/
+
+# Logs
+*.log

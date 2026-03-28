@@ -1,0 +1,20 @@
+{
+  "name": "dynworker",
+  "version": "0.1.0",
+  "description": "Node.js SDK for DynWorker — self-hosted dynamic WebAssembly worker runtime",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "keywords": ["webassembly", "wasm", "workers", "serverless", "sandbox"],
+  "author": "",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.32.1",
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}
