@@ -103,7 +103,8 @@ install_sys_deps() {
   case "$PLATFORM" in
     termux)
       $PKG_UPDATE
-      $PKG_INSTALL git curl nodejs
+      # clang + lld are the correct linker toolchain for Rust on Termux
+      $PKG_INSTALL git curl nodejs clang lld binutils
       # pnpm via npm on Termux
       npm install -g pnpm 2>/dev/null || true
       ;;
@@ -214,20 +215,50 @@ step 5 "Building Rust engine (first run ~2-5 min)..."
 
 cd "$INSTALL_DIR/engine"
 
-# Termux needs a linker hint
+# Termux: set clang as linker and use lld — this is the ONLY linker that works
+# on Android's non-standard filesystem layout. Plain `ld` fails because it
+# cannot find Termux's libc/libgcc at the standard system paths.
 if [ "$PLATFORM" = "termux" ]; then
+  # Detect the Termux clang binary (may be versioned, e.g. clang-18)
+  TERMUX_CLANG=$(command -v clang 2>/dev/null || ls $PREFIX/bin/clang-* 2>/dev/null | sort -V | tail -1)
+  [ -z "$TERMUX_CLANG" ] && die "clang not found in Termux. Run: pkg install clang"
+  TERMUX_ARCH=$(uname -m)  # aarch64 or arm
+  case "$TERMUX_ARCH" in
+    aarch64) RUST_TARGET="aarch64-linux-android" ;;
+    armv7l|arm) RUST_TARGET="armv7-linux-androideabi" ;;
+    x86_64) RUST_TARGET="x86_64-linux-android" ;;
+    i686) RUST_TARGET="i686-linux-android" ;;
+    *) RUST_TARGET="aarch64-linux-android" ;;
+  esac
   mkdir -p .cargo
-  cat > .cargo/config.toml << 'TOML'
-[target.aarch64-linux-android]
-linker = "ld"
+  cat > .cargo/config.toml << TOML
+[target.$RUST_TARGET]
+linker = "$TERMUX_CLANG"
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[build]
+target = "$RUST_TARGET"
 TOML
+  info "Termux: using linker=$TERMUX_CLANG target=$RUST_TARGET"
 fi
 
 source "$HOME/.cargo/env" 2>/dev/null || true
-cargo build --release 2>&1 | grep -E "^error|Compiling dynworker|Finished|warning\[" | head -20 || true
+
+# Build — stream output so user sees progress; capture exit code separately
+set +e
+cargo build --release 2>&1 | grep -E "^error|Compiling dynworker|Finished|warning\[E"
+BUILD_EXIT=${PIPESTATUS[0]}
+set -e
+
+if [ $BUILD_EXIT -ne 0 ]; then
+  echo ""
+  warn "Build failed. Running again with full output for diagnosis:"
+  cargo build --release 2>&1 | tail -40
+  die "Engine build failed. See output above."
+fi
 
 ENGINE_BIN="$INSTALL_DIR/engine/target/release/dynworker-engine"
-[ -f "$ENGINE_BIN" ] || die "Engine build failed. Run 'cargo build --release' in $INSTALL_DIR/engine for details."
+[ -f "$ENGINE_BIN" ] || die "Engine binary not found after build. Check logs above."
 success "Engine built: $ENGINE_BIN"
 
 # ── Step 6: Install Node deps + create launcher ───────────────────────────────
