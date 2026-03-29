@@ -173,16 +173,18 @@ install_sys_deps() {
 install_sys_deps
 success "System dependencies installed"
 
-# ── Step 3: Install Rust ──────────────────────────────────────────────────────
+# ── Step 3: Install Rust (skipped on Termux — uses NodeEngine instead) ────────
 step 3 "Setting up Rust toolchain..."
 
 if [ "$PLATFORM" = "termux" ]; then
-  # Termux has its own rust package — much faster than rustup
-  if ! command -v cargo &>/dev/null; then
-    info "Installing Rust via pkg..."
-    pkg install -y rust
-  fi
+  # On Termux/Android, rustc crashes with SIGSEGV (stack overflow in the compiler)
+  # when compiling wasmtime's macro-heavy code. This is a known Android limitation
+  # (8MB stack vs 64MB on Linux). We use the pure Node.js WebAssembly engine instead.
+  warn "Termux detected — skipping Rust build (using built-in Node.js WASM engine)"
+  warn "The Node.js engine has full WASM + WASI support and requires zero compilation."
+  SKIP_RUST_BUILD=true
 else
+  SKIP_RUST_BUILD=false
   if ! command -v cargo &>/dev/null; then
     info "Installing Rust via rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
@@ -191,11 +193,10 @@ else
   if [ -f "$HOME/.cargo/env" ]; then
     source "$HOME/.cargo/env"
   fi
+  command -v cargo &>/dev/null || die "Rust/cargo not found after install. Please open a new shell and re-run."
+  RUST_VER=$(rustc --version)
+  success "Rust ready: $RUST_VER"
 fi
-
-command -v cargo &>/dev/null || die "Rust/cargo not found after install. Please open a new shell and re-run."
-RUST_VER=$(rustc --version)
-success "Rust ready: $RUST_VER"
 
 # ── Step 4: Clone / update repo ───────────────────────────────────────────────
 step 4 "Fetching DynWorker source..."
@@ -210,56 +211,33 @@ fi
 
 success "Source ready at $INSTALL_DIR"
 
-# ── Step 5: Build Rust engine ─────────────────────────────────────────────────
-step 5 "Building Rust engine (first run ~2-5 min)..."
+# ── Step 5: Build Rust engine (skipped on Termux) ─────────────────────────────
+step 5 "Building Rust engine..."
 
-cd "$INSTALL_DIR/engine"
+if [ "$SKIP_RUST_BUILD" = "true" ]; then
+  success "Skipped (Termux/Android: using pure Node.js WebAssembly engine)"
+  ENGINE_BIN=""
+else
+  cd "$INSTALL_DIR/engine"
+  source "$HOME/.cargo/env" 2>/dev/null || true
 
-# Termux: set clang as linker and use lld — this is the ONLY linker that works
-# on Android's non-standard filesystem layout. Plain `ld` fails because it
-# cannot find Termux's libc/libgcc at the standard system paths.
-if [ "$PLATFORM" = "termux" ]; then
-  # Detect the Termux clang binary (may be versioned, e.g. clang-18)
-  TERMUX_CLANG=$(command -v clang 2>/dev/null || ls $PREFIX/bin/clang-* 2>/dev/null | sort -V | tail -1)
-  [ -z "$TERMUX_CLANG" ] && die "clang not found in Termux. Run: pkg install clang"
-  TERMUX_ARCH=$(uname -m)  # aarch64 or arm
-  case "$TERMUX_ARCH" in
-    aarch64) RUST_TARGET="aarch64-linux-android" ;;
-    armv7l|arm) RUST_TARGET="armv7-linux-androideabi" ;;
-    x86_64) RUST_TARGET="x86_64-linux-android" ;;
-    i686) RUST_TARGET="i686-linux-android" ;;
-    *) RUST_TARGET="aarch64-linux-android" ;;
-  esac
-  mkdir -p .cargo
-  cat > .cargo/config.toml << TOML
-[target.$RUST_TARGET]
-linker = "$TERMUX_CLANG"
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+  # Build — stream output so user sees progress; capture exit code separately
+  set +e
+  cargo build --release 2>&1 | grep -E "^error|Compiling dynworker|Finished|warning\[E"
+  BUILD_EXIT=${PIPESTATUS[0]}
+  set -e
 
-[build]
-target = "$RUST_TARGET"
-TOML
-  info "Termux: using linker=$TERMUX_CLANG target=$RUST_TARGET"
+  if [ $BUILD_EXIT -ne 0 ]; then
+    echo ""
+    warn "Build failed. Running again with full output for diagnosis:"
+    cargo build --release 2>&1 | tail -40
+    die "Engine build failed. See output above."
+  fi
+
+  ENGINE_BIN="$INSTALL_DIR/engine/target/release/dynworker-engine"
+  [ -f "$ENGINE_BIN" ] || die "Engine binary not found after build. Check logs above."
+  success "Engine built: $ENGINE_BIN"
 fi
-
-source "$HOME/.cargo/env" 2>/dev/null || true
-
-# Build — stream output so user sees progress; capture exit code separately
-set +e
-cargo build --release 2>&1 | grep -E "^error|Compiling dynworker|Finished|warning\[E"
-BUILD_EXIT=${PIPESTATUS[0]}
-set -e
-
-if [ $BUILD_EXIT -ne 0 ]; then
-  echo ""
-  warn "Build failed. Running again with full output for diagnosis:"
-  cargo build --release 2>&1 | tail -40
-  die "Engine build failed. See output above."
-fi
-
-ENGINE_BIN="$INSTALL_DIR/engine/target/release/dynworker-engine"
-[ -f "$ENGINE_BIN" ] || die "Engine binary not found after build. Check logs above."
-success "Engine built: $ENGINE_BIN"
 
 # ── Step 6: Install Node deps + create launcher ───────────────────────────────
 step 6 "Installing Node.js dependencies and creating launcher..."
@@ -275,10 +253,17 @@ LAUNCHER_DIR="$HOME/.local/bin"
 mkdir -p "$LAUNCHER_DIR"
 LAUNCHER="$LAUNCHER_DIR/dynworker"
 
+# On Termux, force the Node.js engine; on other platforms use Rust if available
+if [ "$SKIP_RUST_BUILD" = "true" ]; then
+  ENGINE_ENV="export DYNWORKER_ENGINE=node"
+else
+  ENGINE_ENV="export DYNWORKER_ENGINE_BIN=\"$ENGINE_BIN\""
+fi
+
 cat > "$LAUNCHER" << LAUNCHER_EOF
 #!/usr/bin/env bash
 # DynWorker launcher — auto-generated by bootstrap.sh
-export DYNWORKER_ENGINE_BIN="$ENGINE_BIN"
+$ENGINE_ENV
 export PORT="\${DYNWORKER_PORT:-$PORT}"
 source "\$HOME/.cargo/env" 2>/dev/null || true
 cd "$INSTALL_DIR/api"
