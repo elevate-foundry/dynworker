@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
 # DynWorker Bootstrap Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/elevate-foundry/dynworker/master/bootstrap.sh | bash
+# Detects OS/environment and installs ALL dependencies automatically.
+#
+# Supported platforms:
+#   - Termux (Android)
+#   - Ubuntu / Debian / Raspberry Pi OS
+#   - Fedora / RHEL / CentOS / Rocky / AlmaLinux
+#   - Arch Linux / Manjaro
+#   - openSUSE
+#   - macOS (via Homebrew, auto-installed if missing)
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/elevate-foundry/dynworker/master/bootstrap.sh | bash
 set -e
 
 REPO="https://github.com/elevate-foundry/dynworker.git"
 INSTALL_DIR="${DYNWORKER_DIR:-$HOME/.dynworker-runtime}"
+PORT="${DYNWORKER_PORT:-7777}"
 
 # ── Colours ───────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-info()    { echo -e "${CYAN}==>${NC} $*"; }
-success() { echo -e "${GREEN}✓${NC} $*"; }
-warn()    { echo -e "${YELLOW}!${NC} $*"; }
-die()     { echo -e "${RED}✗ Error:${NC} $*" >&2; exit 1; }
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+info()    { echo -e "${CYAN}==>${NC} ${BOLD}$*${NC}"; }
+success() { echo -e "${GREEN}  ✓${NC} $*"; }
+warn()    { echo -e "${YELLOW}  !${NC} $*"; }
+die()     { echo -e "\n${RED}  ✗ Fatal:${NC} $*\n" >&2; exit 1; }
+step()    { echo -e "\n${BOLD}[$1/$TOTAL_STEPS]${NC} $2"; }
 
+TOTAL_STEPS=6
+
+# ── Banner ────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}  ██████╗ ██╗   ██╗███╗   ██╗██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗███████╗██████╗ ${NC}"
 echo -e "${CYAN}  ██╔══██╗╚██╗ ██╔╝████╗  ██║██║    ██║██╔═══██╗██╔══██╗██║ ██╔╝██╔════╝██╔══██╗${NC}"
@@ -25,97 +42,258 @@ echo -e "  Self-hosted dynamic WebAssembly worker runtime"
 echo -e "  ${CYAN}https://github.com/elevate-foundry/dynworker${NC}"
 echo ""
 
-# ── Dependency checks ─────────────────────────────────────────────────────────
-info "Checking dependencies..."
+# ── Step 1: Detect platform ───────────────────────────────────────────────────
+step 1 "Detecting platform..."
 
-check_cmd() {
-  command -v "$1" &>/dev/null || die "'$1' is required but not installed. $2"
+PLATFORM=""
+PKG_INSTALL=""
+PKG_UPDATE=""
+
+# Termux (Android) — check first, no /etc/os-release
+if [ -n "$TERMUX_VERSION" ] || [ -d "/data/data/com.termux" ] || command -v termux-info &>/dev/null; then
+  PLATFORM="termux"
+  PKG_UPDATE="pkg update -y"
+  PKG_INSTALL="pkg install -y"
+
+elif [ "$(uname -s)" = "Darwin" ]; then
+  PLATFORM="macos"
+
+elif [ -f /etc/os-release ]; then
+  . /etc/os-release
+  case "$ID" in
+    ubuntu|debian|raspbian|linuxmint|pop|elementary|kali|zorin)
+      PLATFORM="debian"
+      PKG_UPDATE="sudo apt-get update -qq"
+      PKG_INSTALL="sudo apt-get install -y -qq"
+      ;;
+    fedora)
+      PLATFORM="fedora"
+      PKG_INSTALL="sudo dnf install -y"
+      ;;
+    rhel|centos|rocky|almalinux|ol)
+      PLATFORM="rhel"
+      PKG_INSTALL="sudo dnf install -y"
+      ;;
+    arch|manjaro|endeavouros|garuda)
+      PLATFORM="arch"
+      PKG_UPDATE="sudo pacman -Sy --noconfirm"
+      PKG_INSTALL="sudo pacman -S --noconfirm --needed"
+      ;;
+    opensuse*|sles)
+      PLATFORM="opensuse"
+      PKG_INSTALL="sudo zypper install -y"
+      ;;
+    *)
+      warn "Unknown distro '$ID' — attempting Debian-style install"
+      PLATFORM="debian"
+      PKG_UPDATE="sudo apt-get update -qq"
+      PKG_INSTALL="sudo apt-get install -y -qq"
+      ;;
+  esac
+else
+  die "Cannot detect OS. Supported: Termux, Ubuntu/Debian, Fedora, RHEL, Arch, openSUSE, macOS"
+fi
+
+success "Platform: ${BOLD}$PLATFORM${NC}"
+
+# ── Step 2: Install system dependencies ──────────────────────────────────────
+step 2 "Installing system dependencies..."
+
+install_sys_deps() {
+  case "$PLATFORM" in
+    termux)
+      $PKG_UPDATE
+      $PKG_INSTALL git curl nodejs
+      # pnpm via npm on Termux
+      npm install -g pnpm 2>/dev/null || true
+      ;;
+
+    debian)
+      $PKG_UPDATE
+      $PKG_INSTALL git curl build-essential pkg-config libssl-dev
+      # Install Node.js 22 via NodeSource if node is missing or < 18
+      if ! command -v node &>/dev/null || [ "$(node -e 'process.stdout.write(process.version.slice(1).split(".")[0])')" -lt 18 ]; then
+        info "Installing Node.js 22 via NodeSource..."
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+      fi
+      # pnpm
+      if ! command -v pnpm &>/dev/null; then
+        npm install -g pnpm
+      fi
+      ;;
+
+    fedora)
+      $PKG_INSTALL git curl gcc make openssl-devel
+      if ! command -v node &>/dev/null || [ "$(node -e 'process.stdout.write(process.version.slice(1).split(".")[0])')" -lt 18 ]; then
+        info "Installing Node.js 22 via NodeSource..."
+        curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
+        sudo dnf install -y nodejs
+      fi
+      if ! command -v pnpm &>/dev/null; then npm install -g pnpm; fi
+      ;;
+
+    rhel)
+      sudo dnf install -y epel-release 2>/dev/null || true
+      $PKG_INSTALL git curl gcc make openssl-devel
+      if ! command -v node &>/dev/null || [ "$(node -e 'process.stdout.write(process.version.slice(1).split(".")[0])')" -lt 18 ]; then
+        curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
+        sudo dnf install -y nodejs
+      fi
+      if ! command -v pnpm &>/dev/null; then npm install -g pnpm; fi
+      ;;
+
+    arch)
+      $PKG_UPDATE
+      $PKG_INSTALL git curl base-devel nodejs npm
+      if ! command -v pnpm &>/dev/null; then npm install -g pnpm; fi
+      ;;
+
+    opensuse)
+      $PKG_INSTALL git curl gcc make libopenssl-devel nodejs npm
+      if ! command -v pnpm &>/dev/null; then npm install -g pnpm; fi
+      ;;
+
+    macos)
+      # Install Homebrew if missing
+      if ! command -v brew &>/dev/null; then
+        info "Installing Homebrew..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        # Add brew to PATH for Apple Silicon
+        eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+      fi
+      brew update --quiet
+      brew install git curl node 2>/dev/null || brew upgrade node 2>/dev/null || true
+      if ! command -v pnpm &>/dev/null; then npm install -g pnpm; fi
+      ;;
+  esac
 }
 
-check_cmd git   "Install with: sudo apt install git"
-check_cmd curl  "Install with: sudo apt install curl"
-check_cmd node  "Install Node.js 22+: https://nodejs.org"
-check_cmd pnpm  "Install with: npm install -g pnpm"
+install_sys_deps
+success "System dependencies installed"
 
-# Check Node version >= 18
-NODE_MAJOR=$(node -e "process.stdout.write(process.version.slice(1).split('.')[0])")
-[ "$NODE_MAJOR" -ge 18 ] || die "Node.js 18+ required (found $(node --version))"
+# ── Step 3: Install Rust ──────────────────────────────────────────────────────
+step 3 "Setting up Rust toolchain..."
 
-# Check / install Rust
-if ! command -v cargo &>/dev/null; then
-  warn "Rust not found — installing via rustup..."
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
-  source "$HOME/.cargo/env"
+if [ "$PLATFORM" = "termux" ]; then
+  # Termux has its own rust package — much faster than rustup
+  if ! command -v cargo &>/dev/null; then
+    info "Installing Rust via pkg..."
+    pkg install -y rust
+  fi
+else
+  if ! command -v cargo &>/dev/null; then
+    info "Installing Rust via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+  fi
+  # Source cargo env
+  if [ -f "$HOME/.cargo/env" ]; then
+    source "$HOME/.cargo/env"
+  fi
 fi
-source "$HOME/.cargo/env" 2>/dev/null || true
 
-# Check gcc (needed by Rust linker)
-if ! command -v gcc &>/dev/null; then
-  warn "gcc not found — attempting: sudo apt install -y gcc"
-  sudo apt-get install -y gcc 2>/dev/null || die "Please install gcc: sudo apt install gcc"
-fi
+command -v cargo &>/dev/null || die "Rust/cargo not found after install. Please open a new shell and re-run."
+RUST_VER=$(rustc --version)
+success "Rust ready: $RUST_VER"
 
-success "All dependencies satisfied"
+# ── Step 4: Clone / update repo ───────────────────────────────────────────────
+step 4 "Fetching DynWorker source..."
 
-# ── Clone ─────────────────────────────────────────────────────────────────────
-if [ -d "$INSTALL_DIR" ]; then
+if [ -d "$INSTALL_DIR/.git" ]; then
   info "Updating existing installation at $INSTALL_DIR ..."
   git -C "$INSTALL_DIR" pull --ff-only
 else
-  info "Cloning DynWorker into $INSTALL_DIR ..."
+  info "Cloning into $INSTALL_DIR ..."
   git clone "$REPO" "$INSTALL_DIR"
 fi
 
-cd "$INSTALL_DIR"
+success "Source ready at $INSTALL_DIR"
 
-# ── Build Rust engine ─────────────────────────────────────────────────────────
-info "Building Rust engine (this takes ~2 min on first run)..."
-cd engine
-cargo build --release 2>&1 | grep -E "^error|Compiling dynworker|Finished" || true
-[ -f "target/release/dynworker-engine" ] || die "Engine build failed"
-success "Engine built: engine/target/release/dynworker-engine"
-cd ..
+# ── Step 5: Build Rust engine ─────────────────────────────────────────────────
+step 5 "Building Rust engine (first run ~2-5 min)..."
 
-# ── Install Node deps ─────────────────────────────────────────────────────────
-info "Installing API server dependencies..."
-(cd api && pnpm install --silent)
+cd "$INSTALL_DIR/engine"
 
-info "Installing SDK dependencies..."
-(cd sdk && pnpm install --silent)
+# Termux needs a linker hint
+if [ "$PLATFORM" = "termux" ]; then
+  mkdir -p .cargo
+  cat > .cargo/config.toml << 'TOML'
+[target.aarch64-linux-android]
+linker = "ld"
+TOML
+fi
 
-success "Dependencies installed"
+source "$HOME/.cargo/env" 2>/dev/null || true
+cargo build --release 2>&1 | grep -E "^error|Compiling dynworker|Finished|warning\[" | head -20 || true
 
-# ── Create launcher script ────────────────────────────────────────────────────
-LAUNCHER="$HOME/.local/bin/dynworker"
-mkdir -p "$HOME/.local/bin"
-cat > "$LAUNCHER" << EOF
+ENGINE_BIN="$INSTALL_DIR/engine/target/release/dynworker-engine"
+[ -f "$ENGINE_BIN" ] || die "Engine build failed. Run 'cargo build --release' in $INSTALL_DIR/engine for details."
+success "Engine built: $ENGINE_BIN"
+
+# ── Step 6: Install Node deps + create launcher ───────────────────────────────
+step 6 "Installing Node.js dependencies and creating launcher..."
+
+cd "$INSTALL_DIR/api"
+pnpm install --silent
+
+cd "$INSTALL_DIR/sdk"
+pnpm install --silent
+
+# Create launcher
+LAUNCHER_DIR="$HOME/.local/bin"
+mkdir -p "$LAUNCHER_DIR"
+LAUNCHER="$LAUNCHER_DIR/dynworker"
+
+cat > "$LAUNCHER" << LAUNCHER_EOF
 #!/usr/bin/env bash
+# DynWorker launcher — auto-generated by bootstrap.sh
+export DYNWORKER_ENGINE_BIN="$ENGINE_BIN"
+export PORT="\${DYNWORKER_PORT:-$PORT}"
+source "\$HOME/.cargo/env" 2>/dev/null || true
 cd "$INSTALL_DIR/api"
 exec node src/index.js "\$@"
-EOF
+LAUNCHER_EOF
 chmod +x "$LAUNCHER"
+
+# Add ~/.local/bin to PATH in shell rc files if not already there
+add_to_path() {
+  local RC="$1"
+  if [ -f "$RC" ] && ! grep -q '\.local/bin' "$RC"; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$RC"
+    success "Added ~/.local/bin to PATH in $RC"
+  fi
+}
+add_to_path "$HOME/.bashrc"
+add_to_path "$HOME/.zshrc"
+add_to_path "$HOME/.profile"
+# Termux uses .bashrc but also check bash_profile
+[ "$PLATFORM" = "termux" ] && add_to_path "$HOME/.bash_profile"
+
+export PATH="$HOME/.local/bin:$PATH"
+
+success "Launcher installed: $LAUNCHER"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  DynWorker installed successfully!                       ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║  DynWorker installed successfully!  🎉                       ║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Start the server:"
-echo -e "    ${CYAN}dynworker${NC}                          # if ~/.local/bin is in PATH"
-echo -e "    ${CYAN}node $INSTALL_DIR/api/src/index.js${NC}"
+echo -e "  ${BOLD}Start the server:${NC}"
+echo -e "    ${CYAN}dynworker${NC}"
+echo -e "    ${CYAN}# Listening on http://0.0.0.0:$PORT${NC}"
 echo ""
-echo -e "  Execute a worker (once server is running):"
-echo -e "    ${CYAN}WASM=\$(base64 -w0 path/to/module.wasm)${NC}"
-echo -e "    ${CYAN}curl -X POST http://localhost:7777/v1/execute \\${NC}"
+echo -e "  ${BOLD}Execute a worker:${NC}"
+echo -e "    ${CYAN}WASM=\$(base64 \$([ \"\$(uname)\" = Darwin ] && echo '') -w0 path/to/module.wasm)${NC}"
+echo -e "    ${CYAN}curl -X POST http://localhost:$PORT/v1/execute \\${NC}"
 echo -e "    ${CYAN}  -H 'Content-Type: application/json' \\${NC}"
 echo -e "    ${CYAN}  -d '{\"main_module\":\"m.wasm\",\"modules\":{\"m.wasm\":\"\$WASM\"}}'${NC}"
 echo ""
-echo -e "  Docs: ${CYAN}https://github.com/elevate-foundry/dynworker${NC}"
+echo -e "  ${BOLD}Docs & source:${NC}"
+echo -e "    ${CYAN}https://github.com/elevate-foundry/dynworker${NC}"
 echo ""
 
-# Remind user to add ~/.local/bin to PATH if needed
+# Remind about new shell if PATH was just updated
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-  warn "Add ~/.local/bin to your PATH to use the 'dynworker' command:"
-  echo -e "    ${CYAN}echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc${NC}"
+  warn "Run ${CYAN}source ~/.bashrc${NC} (or open a new terminal) to use the ${CYAN}dynworker${NC} command"
 fi
