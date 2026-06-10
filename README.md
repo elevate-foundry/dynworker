@@ -355,3 +355,17 @@ dynworker/
 ## Licence
 
 Apache 2.0
+
+<!-- ELEVATE:BEGIN (auto-generated section; edits here are overwritten) -->
+## About
+
+| | |
+| --- | --- |
+| **Description** | Self-hosted dynamic WebAssembly worker runtime — open-source alternative to Cloudflare Dynamic Workers |
+| **Language** | JavaScript |
+| **Commits** | 5 |
+| **Created** | 2026-03-29 |
+| **Last push** | 2026-03-29 |
+
+Part of [**elevate-foundry**](https://github.com/elevate-foundry) · [repository](https://github.com/elevate-foundry/dynworker)
+<!-- ELEVATE:END -->
